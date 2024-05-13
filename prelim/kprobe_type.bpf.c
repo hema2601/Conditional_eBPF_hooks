@@ -4,10 +4,13 @@
 #include <bpf/bpf_core_read.h>
     
 char __license[] __attribute__((section("license"), used)) = "GPL";
-SEC("kprobe/netif_rx_internal")
+SEC("kprobe/napi_gro_receive")
 int BPF_KPROBE(kprobe_napi_gro_receive){
-    bpf_printk("Hello!");
+    unsigned long ts;
+    
+  //  bpf_printk("Hello!");
 
+    ts = bpf_ktime_get_ns();
 
     return 0;
 }

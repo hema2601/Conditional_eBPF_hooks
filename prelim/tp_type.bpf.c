@@ -6,8 +6,9 @@
 char __license[] __attribute__((section("license"), used)) = "GPL";
 SEC("tp/net/napi_gro_receive_entry")
 int tp_napi_gro_receive_entry(void *ctx){
-    //bpf_printk("Hello!");
     unsigned long ts;
+    
+   // bpf_printk("Hello!");
 
     ts = bpf_ktime_get_ns();
 
