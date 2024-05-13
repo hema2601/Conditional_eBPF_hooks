@@ -1,5 +1,5 @@
 #!/bin/bash
-current_path=/home/hema/conditional_eBPF_hooks/scripts
+current_path=/home/hema/Conditional_eBPF_hooks/scripts
 
 set -e
 

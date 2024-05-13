@@ -2,8 +2,8 @@
 
 source /usr/sbin/common_irq_affinity.sh
 
-target=${1:-3}
-intf=${2:-ens6}
+intf=${1:-ens6}
+target=${2:-3}
 
 
 echo "Disabling irqbalance service..."

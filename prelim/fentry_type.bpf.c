@@ -8,10 +8,11 @@
 char __license[] __attribute__((section("license"), used)) = "GPL";
 SEC("fentry/napi_gro_receive")
 int BPF_PROG(fentry_napi_gro_receive){
-    bpf_printk("Hello!");
-    //unsigned long ts;
+    unsigned long ts;
 
-    //ts = bpf_ktime_get_ns();
+    ts = bpf_ktime_get_ns();
+    
+    //bpf_printk("Hello!");
 
     return 0;
 }
