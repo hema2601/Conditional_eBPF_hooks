@@ -4,11 +4,11 @@
 #include <bpf/bpf_core_read.h>
     
 char __license[] __attribute__((section("license"), used)) = "GPL";
-SEC("tp/net/napi_gro_receive_entry")
-int tp_napi_gro_receive_entry(void *ctx){
+SEC("tp/net/netif_receive_skb")
+int tp_netif_receive_skb(void *ctx){
     unsigned long ts;
     
-   // bpf_printk("Hello!");
+//    bpf_printk("Hello!");
 
     ts = bpf_ktime_get_ns();
 

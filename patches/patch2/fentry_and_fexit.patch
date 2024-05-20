@@ -1,0 +1,572 @@
+diff -urpN linux-6.1.90/Makefile linux-6.1.90-Sampled/Makefile
+--- linux-6.1.90/Makefile	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/Makefile	2024-05-17 21:02:30.200434605 +0900
+@@ -2,7 +2,7 @@
+ VERSION = 6
+ PATCHLEVEL = 1
+ SUBLEVEL = 90
+-EXTRAVERSION =
++EXTRAVERSION = -sampled2
+ NAME = Curry Ramen
+ 
+ # *DOCUMENTATION*
+Binary files linux-6.1.90/arch/x86/net/.bpf_jit_comp.c.swp and linux-6.1.90-Sampled/arch/x86/net/.bpf_jit_comp.c.swp differ
+diff -urpN linux-6.1.90/arch/x86/net/bpf_jit_comp.c linux-6.1.90-Sampled/arch/x86/net/bpf_jit_comp.c
+--- linux-6.1.90/arch/x86/net/bpf_jit_comp.c	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/arch/x86/net/bpf_jit_comp.c	2024-05-17 16:52:14.253540302 +0900
+@@ -1914,6 +1914,121 @@ static int invoke_bpf(const struct btf_f
+ 	return 0;
+ }
+ 
++//[HEMA]==================================================================
++static int emit_sampled_prologue( u8 **pprog, u32 * cnt_addr, u32 srate, u8 **final_jmp){
++
++    u8 *prog = *pprog;
++    u8 *jmp_insn;
++    //write prologue
++
++    //mv counter addr into reg10
++    // movabs r8, cnt_addr
++    
++    //emit_mov_imm64(&prog, BPF_REG_5, (u32)((u64)cnt_addr >> 32), (u32)((u64)cnt_addr & 0xFFFFFFFF));
++    EMIT2(0x48, 0xb8);
++    *((u64*)prog) = (u64)cnt_addr;
++    prog += 8;
++
++
++    //load actual counter value into reg9
++    //mov rcx, QWORD PTR [r8 + 0x0] 
++    
++    //emit_ldx(&prog, BPF_DW, BPF_REG_4, BPF_REG_5, 0); //[TODO]We are reading a double word (64bit), maybe the counter shoudl be 64bit, too, then
++    EMIT3(0x4c, 0x8b, 0x10);
++
++
++    //mv srate into reg8
++    //mov edx, srate
++    
++    //emit_mov_imm64(&prog, BPF_REG_3, 0, srate-1);
++    EMIT3(0x49, 0xC7, 0xC3);
++    *((u32*)prog) = (u32)(srate - 1);
++    prog += 4;
++
++
++    //compare counter with srate
++    // cmp rdx, rcx
++    
++    //EMIT3(0x48, 0x39, 0xCA);
++    EMIT3(0x4D, 0x39, 0xDA);
++
++    //emit 2 nops that will be replaced with JE insn 
++    jmp_insn = prog;
++    emit_nops(&prog, 2);
++
++    //increase counter by 1
++    //add rcx, 0x1
++    
++    //EMIT4(0x48, 0x83, 0xC1, 0x01);
++    EMIT4(0x49, 0x83, 0xC2, 0x01);
++
++    //store counter
++    
++    //emit_stx(&prog, BPF_DW, BPF_REG_5, BPF_REG_4, 0); //[TODO]Is there a chance that the cnt will overflow?
++    EMIT3(0x4C, 0x89, 0x10);
++
++
++    //unconditional jump to unknown target
++    //emit 5 nops that will be replaced with JMP insn (could be a long jump)
++    
++    if(final_jmp){
++        *final_jmp = prog;
++        emit_nops(&prog, 5);
++    }else{
++        EMIT1(0xC9); /* leave */
++        emit_return(&prog, prog);
++    }
++
++    //fill in je target
++    jmp_insn[0] = X86_JE;
++    jmp_insn[1] = prog - jmp_insn - 2;
++
++    //reset counter
++
++    //emit_mov_imm64(&prog, BPF_REG_4, 0, 0);
++    EMIT3(0x4D, 0x31, 0xD2);
++    //emit_stx(&prog, BPF_DW, BPF_REG_5, BPF_REG_4, 0); //[TODO]Is there a chance that the cnt will overflow?
++    EMIT3(0x4C, 0x89, 0x10);
++
++    *pprog = prog;
++
++    return 0;
++
++}
++
++
++static int invoke_bpf_sampled(const struct btf_func_model *m, u8 **pprog,
++		      struct bpf_tramp_links *tl, int stack_size,
++		      int run_ctx_off, bool save_ret)
++{
++	int i;
++	u8 *prog = *pprog;
++    //u32 *cnt_addr;
++    //u32 srate = 100;
++    u8 *final_jmp;
++
++	for (i = 0; i < tl->nr_links; i++) {
++
++        emit_sampled_prologue(&prog, &(tl->links[i]->link.prog->aux->sampling_count), tl->links[i]->link.prog->aux->sampling_rate, &final_jmp);
++
++        //actual body
++		if (invoke_bpf_prog(m, &prog, tl->links[i], stack_size,
++				    run_ctx_off, save_ret))
++			return -EINVAL;
++
++        //fill out final jump target for sampling
++        final_jmp[0] = 0xE9;
++	    *((u32*)(final_jmp + 1)) = (u32)(prog - final_jmp - 5);
++	}
++	*pprog = prog;
++	return 0;
++}
++
++//========================================================================
++
++
++
++
+ static int invoke_bpf_mod_ret(const struct btf_func_model *m, u8 **pprog,
+ 			      struct bpf_tramp_links *tl, int stack_size,
+ 			      int run_ctx_off, u8 **branches)
+@@ -2020,6 +2135,15 @@ int arch_prepare_bpf_trampoline(struct b
+ 	struct bpf_tramp_links *fentry = &tlinks[BPF_TRAMP_FENTRY];
+ 	struct bpf_tramp_links *fexit = &tlinks[BPF_TRAMP_FEXIT];
+ 	struct bpf_tramp_links *fmod_ret = &tlinks[BPF_TRAMP_MODIFY_RETURN];
++
++//[HEMA]=====================================================
++	struct bpf_tramp_links *sampled_fentry = &tlinks[BPF_TRAMP_SAMPLED_FENTRY];
++	struct bpf_tramp_links *sampled_fexit = &tlinks[BPF_TRAMP_SAMPLED_FEXIT];
++    //u8 *final_jmp;
++
++//===========================================================
++
++
+ 	void *orig_call = func_addr;
+ 	u8 **branches = NULL;
+ 	u8 *prog;
+@@ -2086,8 +2210,32 @@ int arch_prepare_bpf_trampoline(struct b
+ 	prog = image;
+ 
+ 	EMIT_ENDBR();
++
+ 	EMIT1(0x55);		 /* push rbp */
+ 	EMIT3(0x48, 0x89, 0xE5); /* mov rbp, rsp */
++
++//[HEMA]===========================================================
++
++    //If fully sampled trampoline, we can try to exit right away
++    if(flags & BPF_TRAMP_F_SAMPLED){
++
++        if (sampled_fentry->nr_links)
++            emit_sampled_prologue(&prog, &(sampled_fentry->links[0]->link.prog->aux->sampling_count), sampled_fentry->links[0]->link.prog->aux->sampling_rate, NULL);
++        else
++            emit_sampled_prologue(&prog, &(sampled_fexit->links[0]->link.prog->aux->sampling_count), sampled_fexit->links[0]->link.prog->aux->sampling_rate, NULL);
++        
++        //final_jmp[0] = 0xE9;
++	    //*((u32*)(final_jmp + 1)) = (u32)(prog - final_jmp - 5);
++
++
++     //   EMIT1(0xC9); /* leave */
++       // emit_return(&prog, prog);
++
++    }
++
++//=================================================================
++
++
+ 	EMIT4(0x48, 0x83, 0xEC, stack_size); /* sub rsp, stack_size */
+ 	if (flags & BPF_TRAMP_F_TAIL_CALL_CTX)
+ 		EMIT1(0x50);		/* push rax */
+@@ -2111,6 +2259,7 @@ int arch_prepare_bpf_trampoline(struct b
+ 
+ 	save_regs(m, &prog, nr_regs, regs_off);
+ 
++
+ 	if (flags & BPF_TRAMP_F_CALL_ORIG) {
+ 		/* arg1: mov rdi, im */
+ 		emit_mov_imm64(&prog, BPF_REG_1, (long) im >> 32, (u32) (long) im);
+@@ -2125,6 +2274,24 @@ int arch_prepare_bpf_trampoline(struct b
+ 			       flags & BPF_TRAMP_F_RET_FENTRY_RET))
+ 			return -EINVAL;
+ 
++    //[HEMA]=============================================
++    if (sampled_fentry->nr_links){
++
++        if(!(flags & BPF_TRAMP_F_SAMPLED)){
++            if (invoke_bpf_sampled(m, &prog, sampled_fentry, regs_off, run_ctx_off,
++                        flags & BPF_TRAMP_F_RET_FENTRY_RET))
++                return -EINVAL;
++        }else{
++		    if (invoke_bpf(m, &prog, sampled_fentry, regs_off, run_ctx_off,
++			       flags & BPF_TRAMP_F_RET_FENTRY_RET))
++			    return -EINVAL;
++
++        }
++    }
++
++    //===================================================
++
++
+ 	if (fmod_ret->nr_links) {
+ 		branches = kcalloc(fmod_ret->nr_links, sizeof(u8 *),
+ 				   GFP_KERNEL);
+@@ -2185,7 +2352,24 @@ int arch_prepare_bpf_trampoline(struct b
+ 			goto cleanup;
+ 		}
+ 
+-	if (flags & BPF_TRAMP_F_RESTORE_REGS)
++    //[HEMA]=============================================
++    if (sampled_fexit->nr_links){
++
++        if(!(flags & BPF_TRAMP_F_SAMPLED)){
++            if (invoke_bpf_sampled(m, &prog, sampled_fexit, regs_off, run_ctx_off, false)){
++                ret = -EINVAL;
++                goto cleanup;
++            }
++        }else{
++		    if (invoke_bpf(m, &prog, sampled_fexit, regs_off, run_ctx_off, false)){
++			    ret = -EINVAL;
++                goto cleanup;
++            }
++        }
++    }
++    //===================================================
++
++  	if (flags & BPF_TRAMP_F_RESTORE_REGS)
+ 		restore_regs(m, &prog, nr_regs, regs_off);
+ 
+ 	/* This needs to be done regardless. If there were fmod_ret programs,
+@@ -2211,7 +2395,16 @@ int arch_prepare_bpf_trampoline(struct b
+ 		emit_ldx(&prog, BPF_DW, BPF_REG_0, BPF_REG_FP, -8);
+ 
+ 	EMIT1(0x5B); /* pop rbx */
+-	EMIT1(0xC9); /* leave */
++//[HEMA]===========================================================	
++    /*if(flags & BPF_TRAMP_F_SAMPLED){
++        //fill out final jump target for sampling
++        final_jmp[0] = 0xE9;
++	    *((u32*)(final_jmp + 1)) = (u32)(prog - final_jmp - 5);
++
++    }*/
++//=================================================================	
++
++    EMIT1(0xC9); /* leave */
+ 	if (flags & BPF_TRAMP_F_SKIP_FRAME)
+ 		/* skip our return address and return to parent */
+ 		EMIT4(0x48, 0x83, 0xC4, 8); /* add rsp, 8 */
+Binary files linux-6.1.90/include/linux/.lsm_hook_defs.h.swp and linux-6.1.90-Sampled/include/linux/.lsm_hook_defs.h.swp differ
+diff -urpN linux-6.1.90/include/linux/bpf.h linux-6.1.90-Sampled/include/linux/bpf.h
+--- linux-6.1.90/include/linux/bpf.h	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/include/linux/bpf.h	2024-05-15 19:11:04.005017451 +0900
+@@ -844,6 +844,15 @@ struct btf_func_model {
+  */
+ #define BPF_TRAMP_F_TAIL_CALL_CTX	BIT(7)
+ 
++//[HEMA]============================
++
++/* Indicates that this trampoline should only be taken every nth attempt */
++
++#define BPF_TRAMP_F_SAMPLED         BIT(8)
++
++//==================================
++
++
+ /* Each call __bpf_prog_enter + call bpf_func + call __bpf_prog_exit is ~50
+  * bytes on x86.
+  */
+@@ -907,6 +916,10 @@ enum bpf_tramp_prog_type {
+ 	BPF_TRAMP_FENTRY,
+ 	BPF_TRAMP_FEXIT,
+ 	BPF_TRAMP_MODIFY_RETURN,
++    //[HEMA]=========================
++	BPF_TRAMP_SAMPLED_FENTRY,
++	BPF_TRAMP_SAMPLED_FEXIT,
++    //===============================
+ 	BPF_TRAMP_MAX,
+ 	BPF_TRAMP_REPLACE, /* more than MAX */
+ };
+@@ -1160,6 +1173,10 @@ struct bpf_prog_aux {
+ 	u32 ctx_arg_info_size;
+ 	u32 max_rdonly_access;
+ 	u32 max_rdwr_access;
++//[HEMA]=====================================================
++    u32 sampling_rate;
++    u32 sampling_count; //[TODO] This absolutely cannot be a single variable for synchronization reasons. Prototype so far.
++//===========================================================
+ 	struct btf *attach_btf;
+ 	const struct bpf_ctx_arg_aux *ctx_arg_info;
+ 	struct mutex dst_mutex; /* protects dst_* pointers below, *after* prog becomes visible */
+Binary files linux-6.1.90/include/uapi/linux/.bpf.h.swp and linux-6.1.90-Sampled/include/uapi/linux/.bpf.h.swp differ
+diff -urpN linux-6.1.90/include/uapi/linux/bpf.h linux-6.1.90-Sampled/include/uapi/linux/bpf.h
+--- linux-6.1.90/include/uapi/linux/bpf.h	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/include/uapi/linux/bpf.h	2024-05-17 20:33:06.283839513 +0900
+@@ -1025,6 +1025,12 @@ enum bpf_attach_type {
+ 	BPF_PERF_EVENT,
+ 	BPF_TRACE_KPROBE_MULTI,
+ 	BPF_LSM_CGROUP,
++//[HEMA]=====================
++
++	BPF_TRACE_SAMPLED_FENTRY,
++	BPF_TRACE_SAMPLED_FEXIT,
++
++//===========================
+ 	__MAX_BPF_ATTACH_TYPE
+ };
+ 
+@@ -1390,6 +1396,13 @@ union bpf_attr {
+ 		__aligned_u64	fd_array;	/* array of FDs */
+ 		__aligned_u64	core_relos;
+ 		__u32		core_relo_rec_size; /* sizeof(struct bpf_core_relo) */
++//[HEMA]=================================
++
++		__u32		sampling_rate; //sampling rate for SAMPLED_FENTRY/FEXIT programs
++						//[TODO] Remove this
++//======================================
++
++
+ 	};
+ 
+ 	struct { /* anonymous struct used by BPF_OBJ_* commands */
+Binary files linux-6.1.90/kernel/bpf/.trampoline.c.swp and linux-6.1.90-Sampled/kernel/bpf/.trampoline.c.swp differ
+diff -urpN linux-6.1.90/kernel/bpf/syscall.c linux-6.1.90-Sampled/kernel/bpf/syscall.c
+--- linux-6.1.90/kernel/bpf/syscall.c	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/kernel/bpf/syscall.c	2024-05-17 18:40:31.234395544 +0900
+@@ -2591,6 +2591,13 @@ static int bpf_prog_load(union bpf_attr
+ 	prog->aux->sleepable = attr->prog_flags & BPF_F_SLEEPABLE;
+ 	prog->aux->xdp_has_frags = attr->prog_flags & BPF_F_XDP_HAS_FRAGS;
+ 
++//[HEMA]============================================
++
++	prog->aux->sampling_rate = ((attr->expected_attach_type & (BPF_TRACE_SAMPLED_FENTRY | BPF_TRACE_SAMPLED_FEXIT))) ? attr->sampling_rate : 0;
++
++//==================================================
++
++
+ 	err = security_bpf_prog_alloc(prog->aux);
+ 	if (err)
+ 		goto free_prog;
+@@ -2635,7 +2642,7 @@ static int bpf_prog_load(union bpf_attr
+ 	prog = bpf_prog_select_runtime(prog, &err);
+ 	if (err < 0)
+ 		goto free_used_maps;
+-
++	
+ 	err = bpf_prog_alloc_id(prog);
+ 	if (err)
+ 		goto free_used_maps;
+@@ -2991,6 +2998,10 @@ static int bpf_tracing_prog_attach(struc
+ 	case BPF_PROG_TYPE_TRACING:
+ 		if (prog->expected_attach_type != BPF_TRACE_FENTRY &&
+ 		    prog->expected_attach_type != BPF_TRACE_FEXIT &&
++			//[HEMA]===================================================
++		    prog->expected_attach_type != BPF_TRACE_SAMPLED_FENTRY &&
++		    prog->expected_attach_type != BPF_TRACE_SAMPLED_FEXIT &&
++			//=========================================================
+ 		    prog->expected_attach_type != BPF_MODIFY_RETURN) {
+ 			err = -EINVAL;
+ 			goto out_put_prog;
+@@ -3478,6 +3489,10 @@ attach_type_to_prog_type(enum bpf_attach
+ 	case BPF_TRACE_RAW_TP:
+ 	case BPF_TRACE_FENTRY:
+ 	case BPF_TRACE_FEXIT:
++	//[HEMA]================
++	case BPF_TRACE_SAMPLED_FENTRY:
++	case BPF_TRACE_SAMPLED_FEXIT:
++	//======================
+ 	case BPF_MODIFY_RETURN:
+ 		return BPF_PROG_TYPE_TRACING;
+ 	case BPF_LSM_MAC:
+diff -urpN linux-6.1.90/kernel/bpf/trampoline.c linux-6.1.90-Sampled/kernel/bpf/trampoline.c
+--- linux-6.1.90/kernel/bpf/trampoline.c	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/kernel/bpf/trampoline.c	2024-05-17 18:38:11.808100682 +0900
+@@ -112,7 +112,14 @@ bool bpf_prog_has_trampoline(const struc
+ 
+ 	return (ptype == BPF_PROG_TYPE_TRACING &&
+ 		(eatype == BPF_TRACE_FENTRY || eatype == BPF_TRACE_FEXIT ||
+-		 eatype == BPF_MODIFY_RETURN)) ||
++		 eatype == BPF_MODIFY_RETURN
++		//[HEMA]=========================================
++		
++		|| BPF_TRACE_SAMPLED_FENTRY || eatype == BPF_TRACE_SAMPLED_FEXIT
++		//===============================================
++
++
++		)) ||
+ 		(ptype == BPF_PROG_TYPE_LSM && eatype == BPF_LSM_MAC);
+ }
+ 
+@@ -417,6 +424,40 @@ out_free_im:
+ out:
+ 	return ERR_PTR(err);
+ }
++//[HEMA]========================================
++//function to determine whether all attached sampled programs share the same sampling rate
++
++int bpf_tramp_same_srate(struct bpf_trampoline *tr, struct bpf_tramp_links *tlinks){
++
++    u32 srate = -1;
++
++    for(int i = 0; i < tlinks[BPF_TRAMP_SAMPLED_FENTRY].nr_links; i++){
++        if(srate == -1){
++            srate = tlinks[BPF_TRAMP_SAMPLED_FENTRY].links[i]->link.prog->aux->sampling_rate; 
++        }else{
++            if(srate != tlinks[BPF_TRAMP_SAMPLED_FENTRY].links[i]->link.prog->aux->sampling_rate)
++                return 0;
++        }
++        
++    }
++    
++    for(int i = 0; i < tlinks[BPF_TRAMP_SAMPLED_FEXIT].nr_links; i++){
++        if(srate == -1){
++            srate = tlinks[BPF_TRAMP_SAMPLED_FEXIT].links[i]->link.prog->aux->sampling_rate; 
++        }else{
++            if(srate != tlinks[BPF_TRAMP_SAMPLED_FEXIT].links[i]->link.prog->aux->sampling_rate)
++                return 0;
++        }
++
++    }
++
++    if(srate == -1) return 0;
++
++    return 1;
++
++
++}
++//==============================================
+ 
+ static int bpf_trampoline_update(struct bpf_trampoline *tr, bool lock_direct_mutex)
+ {
+@@ -447,7 +488,14 @@ static int bpf_trampoline_update(struct
+ 	tr->flags &= (BPF_TRAMP_F_SHARE_IPMODIFY | BPF_TRAMP_F_TAIL_CALL_CTX);
+ 
+ 	if (tlinks[BPF_TRAMP_FEXIT].nr_links ||
+-	    tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links) {
++	    tlinks[BPF_TRAMP_MODIFY_RETURN].nr_links
++//[HEMA]===========================
++
++	    || tlinks[BPF_TRAMP_SAMPLED_FEXIT].nr_links
++
++//=================================
++
++        ) {
+ 		/* NOTE: BPF_TRAMP_F_RESTORE_REGS and BPF_TRAMP_F_SKIP_FRAME
+ 		 * should not be set together.
+ 		 */
+@@ -459,13 +507,25 @@ static int bpf_trampoline_update(struct
+ 	if (ip_arg)
+ 		tr->flags |= BPF_TRAMP_F_IP_ARG;
+ 
++//[HEMA]====================================
++
++    //if we only have sampled progs attached and they share the sampling rate, mark the entire trampoline as sampled
++    /*if((tlinks[BPF_TRAMP_SAMPLED_FENTRY].nr_links + tlinks[BPF_TRAMP_SAMPLED_FEXIT].nr_links) == total
++        && bpf_tramp_same_srate(tr, tlinks)){
++		    tr->flags |= BPF_TRAMP_F_SAMPLED;
++        }*/
++
++//==========================================
++
++
++
+ #ifdef CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS
+ again:
+ 	if ((tr->flags & BPF_TRAMP_F_SHARE_IPMODIFY) &&
+ 	    (tr->flags & BPF_TRAMP_F_CALL_ORIG))
+ 		tr->flags |= BPF_TRAMP_F_ORIG_STACK;
+ #endif
+-
++	
+ 	err = arch_prepare_bpf_trampoline(im, im->image, im->image + PAGE_SIZE,
+ 					  &tr->func.model, tr->flags, tlinks,
+ 					  tr->func.addr);
+@@ -522,10 +582,18 @@ static enum bpf_tramp_prog_type bpf_atta
+ 	switch (prog->expected_attach_type) {
+ 	case BPF_TRACE_FENTRY:
+ 		return BPF_TRAMP_FENTRY;
++    //[HEMA]==================================
++	case BPF_TRACE_SAMPLED_FENTRY:
++		return BPF_TRAMP_SAMPLED_FENTRY;
++    //========================================
+ 	case BPF_MODIFY_RETURN:
+ 		return BPF_TRAMP_MODIFY_RETURN;
+ 	case BPF_TRACE_FEXIT:
+ 		return BPF_TRAMP_FEXIT;
++    //[HEMA]==================================
++	case BPF_TRACE_SAMPLED_FEXIT:
++		return BPF_TRAMP_SAMPLED_FEXIT;
++    //========================================
+ 	case BPF_LSM_MAC:
+ 		if (!prog->aux->attach_func_proto->type)
+ 			/* The function returns void, we cannot modify its
+@@ -576,6 +644,22 @@ static int __bpf_trampoline_link_prog(st
+ 		return -EBUSY;
+ 	}
+ 
++//[HEMA]=============================================
++
++    //Set sampling count to 0 here. 
++    //There is probably a better place for this, but for now this will do
++    //[TODO] Shouldnt the count for all programs be set back? Just a thought
++
++
++    if(kind == BPF_TRAMP_SAMPLED_FENTRY ||
++               BPF_TRAMP_SAMPLED_FEXIT){
++        link->link.prog->aux->sampling_count = 0;
++    }
++
++
++//===================================================
++
++
+ 	hlist_add_head(&link->tramp_hlist, &tr->progs_hlist[kind]);
+ 	tr->progs_cnt[kind]++;
+ 	err = bpf_trampoline_update(tr, true /* lock_direct_mutex */);
+diff -urpN linux-6.1.90/kernel/bpf/verifier.c linux-6.1.90-Sampled/kernel/bpf/verifier.c
+--- linux-6.1.90/kernel/bpf/verifier.c	2024-05-02 23:29:32.000000000 +0900
++++ linux-6.1.90-Sampled/kernel/bpf/verifier.c	2024-05-15 19:11:04.085015378 +0900
+@@ -10931,6 +10931,11 @@ static int check_return_code(struct bpf_
+ 		switch (env->prog->expected_attach_type) {
+ 		case BPF_TRACE_FENTRY:
+ 		case BPF_TRACE_FEXIT:
++		//[HEMA]==========================================
++		case BPF_TRACE_SAMPLED_FENTRY:
++		case BPF_TRACE_SAMPLED_FEXIT:
++		
++		//================================================
+ 			range = tnum_const(0);
+ 			break;
+ 		case BPF_TRACE_RAW_TP:
+@@ -15256,7 +15261,13 @@ int bpf_check_attach_target(struct bpf_v
+ 		if (tgt_prog->type == BPF_PROG_TYPE_TRACING &&
+ 		    prog_extension &&
+ 		    (tgt_prog->expected_attach_type == BPF_TRACE_FENTRY ||
+-		     tgt_prog->expected_attach_type == BPF_TRACE_FEXIT)) {
++		     tgt_prog->expected_attach_type == BPF_TRACE_FEXIT
++             //[HEMA]========================================
++             ||    
++		     tgt_prog->expected_attach_type == BPF_TRACE_SAMPLED_FENTRY ||
++		     tgt_prog->expected_attach_type == BPF_TRACE_SAMPLED_FEXIT
++             //==============================================
++                )) {
+ 			/* Program extensions can extend all program types
+ 			 * except fentry/fexit. The reason is the following.
+ 			 * The fentry/fexit programs are used for performance
+@@ -15332,6 +15343,10 @@ int bpf_check_attach_target(struct bpf_v
+ 	case BPF_LSM_CGROUP:
+ 	case BPF_TRACE_FENTRY:
+ 	case BPF_TRACE_FEXIT:
++    //[HEMA]=============================
++	case BPF_TRACE_SAMPLED_FENTRY:
++	case BPF_TRACE_SAMPLED_FEXIT:
++    //===================================
+ 		if (!btf_type_is_func(t)) {
+ 			bpf_log(log, "attach_btf_id %u is not a function\n",
+ 				btf_id);

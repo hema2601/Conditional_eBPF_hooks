@@ -6,8 +6,8 @@
 #include <bpf/bpf_core_read.h>
     
 char __license[] __attribute__((section("license"), used)) = "GPL";
-SEC("fentry/__netif_receive_skb_core")
-int BPF_PROG(fentry___netif_receive_skb_core){
+SEC("fexit/__netif_receive_skb_core")
+int BPF_PROG(fexit___netif_receive_skb_core){
     unsigned long ts;
 
     ts = bpf_ktime_get_ns();
