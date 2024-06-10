@@ -14,7 +14,7 @@ echo "" > /sys/kernel/tracing/trace
 
 echo "Make programs..."
 
-make clean -C $current_path/../prelim -f Makefile
+make clean -C $current_path/../experiments -f Makefile
 
 
 

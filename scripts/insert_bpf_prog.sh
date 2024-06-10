@@ -21,11 +21,11 @@ echo "" > /sys/kernel/tracing/trace
 
 echo "Make programs..."
 
-make -C $current_path/../prelim -f Makefile
+make -C $current_path/../experiments -f Makefile
 
 echo "Insert program $prog_name..."
 
-$bpftool prog load $current_path/../prelim/$prog_name.bpf.o /sys/fs/bpf/$prog_name autoattach
+$bpftool prog load $current_path/../experiments/$prog_name.bpf.o /sys/fs/bpf/$prog_name autoattach
 
 
 
